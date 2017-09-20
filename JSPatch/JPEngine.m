@@ -289,8 +289,11 @@ static NSOperationQueue *_garbageCollectOperationQueue;
     if (!_regex) {
         _regex = [NSRegularExpression regularExpressionWithPattern:_regexStr options:0 error:nil];
     }
+//    用新字段替换原文本中的对应字段，并返回操作后的NSString
     NSString *formatedScript = [NSString stringWithFormat:@";(function(){try{%@}catch(e){_OC_catch(e.message, e.stack)}})();", [_regex stringByReplacingMatchesInString:script options:0 range:NSMakeRange(0, script.length) withTemplate:_replaceStr]];
     @try {
+//        (?<!\\)\.\s*(\w+)\s*\(      .__c("$1")(
+        //替换函数.self.navigationController()为__c("navigationController")()
         if ([_context respondsToSelector:@selector(evaluateScript:withSourceURL:)]) {
             return [_context evaluateScript:formatedScript withSourceURL:resourceURL];
         } else {
@@ -468,10 +471,11 @@ static void addMethodToProtocol(Protocol* protocol, NSString *selectorName, NSSt
     protocol_addMethodDescription(protocol, sel, type, YES, isInstance);
 }
 
+//定了一个名为defineClass的函数，这个函数对类进行真正的重写操作
 static NSDictionary *defineClass(NSString *classDeclaration, JSValue *instanceMethods, JSValue *classMethods)
 {
     NSScanner *scanner = [NSScanner scannerWithString:classDeclaration];
-    
+//    首先是对类名进行解析，把协议名、类名、父类名都解析出来。如果类不存在，那么创建并注册该类
     NSString *className;
     NSString *superClassName;
     NSString *protocolNames;
@@ -517,13 +521,15 @@ static NSDictionary *defineClass(NSString *classDeclaration, JSValue *instanceMe
         NSDictionary *methodDict = [jsMethods toDictionary];
         for (NSString *jsMethodName in methodDict.allKeys) {
             JSValue *jsMethodArr = [jsMethods valueForProperty:jsMethodName];
+            //参数个数
             int numberOfArg = [jsMethodArr[0] toInt32];
+            //替换方法名字 __ 到-
             NSString *selectorName = convertJPSelectorString(jsMethodName);
-            
+            //修正
             if ([selectorName componentsSeparatedByString:@":"].count - 1 < numberOfArg) {
                 selectorName = [selectorName stringByAppendingString:@":"];
             }
-            
+            //方法
             JSValue *jsMethod = jsMethodArr[1];
             if (class_respondsToSelector(currCls, NSSelectorFromString(selectorName))) {
                 overrideMethod(currCls, selectorName, jsMethod, !isInstance, NULL);
@@ -592,12 +598,12 @@ static void JPForwardInvocation(__unsafe_unretained id assignSlf, SEL selector, 
     NSString *selectorName = NSStringFromSelector(invocation.selector);
     NSString *JPSelectorName = [NSString stringWithFormat:@"_JP%@", selectorName];
     SEL JPSelector = NSSelectorFromString(JPSelectorName);
-    
+//    把selector前面加上 _JP,构成的新的selector，正好是上一步中我们添加的新方法，如果class无法识别，说明这个不是我们重写的方法，那么走原来的消息转发，上一节中介绍过了
     if (!class_respondsToSelector(object_getClass(slf), JPSelector)) {
         JPExcuteORIGForwardInvocation(slf, selector, invocation);
         return;
     }
-    
+//    把self和其他的参数都转换称js对象，我们知道js端重写的函数，传递过来是JSValue类型，这里对应着js函数，我们可以对其调用callWithArgument方法，所以参数也要是js对象，把js对象参数传递过去，执行函数。上文提到过，类型的转换在原理详解blog中有介绍。
     NSMutableArray *argList = [[NSMutableArray alloc] init];
     if ([slf class] == slf) {
         [argList addObject:[JSValue valueWithObject:@{@"__clsName": NSStringFromClass([slf class])} inContext:_context]];
@@ -920,17 +926,18 @@ static void overrideMethod(Class cls, NSString *selectorName, JSValue *function,
             }
         }
     #endif
-
+//把selector对应的具体实现使用class_replaceMethod替换成_objc_msgForward，我们知道这个对应着消息转发机制。例如，本文的例子中点击button是不会执行空的handleBtn方法的，而是直接走消息转发的路径。
     class_replaceMethod(cls, selector, msgForwardIMP, typeDescription);
-
+//    这一步的目的是如果原来的类已经实现了自定义的消息转发，重写了forwardInvocation方法。那么我们在上面一步中已经修改了forwardInvocation对应的方法实现怎么办？保存旧的forwardInvocation实现的意义就是，会在新的实现中判断，如果当前的selector不是被js修改重写过的，就执行旧的实现。
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wundeclared-selector"
+//    向class添加名为ORIGforwardInvocation的方法，实现是原始的forwardInvocation的IMP。
     if (class_getMethodImplementation(cls, @selector(forwardInvocation:)) != (IMP)JPForwardInvocation) {
         IMP originalForwardImp = class_replaceMethod(cls, @selector(forwardInvocation:), (IMP)JPForwardInvocation, "v@:@");
         class_addMethod(cls, @selector(ORIGforwardInvocation:), originalForwardImp, "v@:@");
     }
 #pragma clang diagnostic pop
-
+//    向class添加名为ORIG＋selector，对应原始selector的IMP。JS 可以通过这个方法调用到原来的实现。
     if (class_respondsToSelector(cls, selector)) {
         NSString *originalSelectorName = [NSString stringWithFormat:@"ORIG%@", selectorName];
         SEL originalSelector = NSSelectorFromString(originalSelectorName);
@@ -938,11 +945,12 @@ static void overrideMethod(Class cls, NSString *selectorName, JSValue *function,
             class_addMethod(cls, originalSelector, originalImp, typeDescription);
         }
     }
-    
+//    v向class添加名为_JP ＋ selector，对应js重写的函数实现
     NSString *JPSelectorName = [NSString stringWithFormat:@"_JP%@", selectorName];
     SEL JPSelector = NSSelectorFromString(JPSelectorName);
-
+//    我们存储了一份全局的字典对象，字典的key是classname，
     _initJPOverideMethods(cls);
+
     _JSOverideMethods[cls][JPSelectorName] = function;
     
     class_addMethod(cls, JPSelector, msgForwardIMP, typeDescription);
@@ -950,6 +958,7 @@ static void overrideMethod(Class cls, NSString *selectorName, JSValue *function,
 
 #pragma mark -
 
+// 具体方法实现
 static id callSelector(NSString *className, NSString *selectorName, JSValue *arguments, JSValue *instance, BOOL isSuper)
 {
     NSString *realClsName = [[instance valueForProperty:@"__realClsName"] toString];
@@ -958,6 +967,7 @@ static id callSelector(NSString *className, NSString *selectorName, JSValue *arg
         instance = formatJSToOC(instance);
         if (!instance || instance == _nilObj || [instance isKindOfClass:[JPBoxing class]]) return @{@"__isNil": @(YES)};
     }
+//    把js对象和js参数转换为OC对象；
     id argumentsObj = formatJSToOC(arguments);
     
     if (instance && [selectorName isEqualToString:@"toJS"]) {
@@ -968,7 +978,7 @@ static id callSelector(NSString *className, NSString *selectorName, JSValue *arg
 
     Class cls = instance ? [instance class] : NSClassFromString(className);
     SEL selector = NSSelectorFromString(selectorName);
-    
+//    判断是否调用的是父类的方法，如果是，就走父类的方法实现；
     NSString *superClassName = nil;
     if (isSuper) {
         NSString *superSelectorName = [NSString stringWithFormat:@"SUPER_%@", selectorName];
@@ -986,7 +996,7 @@ static id callSelector(NSString *className, NSString *selectorName, JSValue *arg
         IMP superIMP = method_getImplementation(superMethod);
         
         class_addMethod(cls, superSelector, superIMP, method_getTypeEncoding(superMethod));
-        
+        //方法重新写
         NSString *JPSelectorName = [NSString stringWithFormat:@"_JP%@", selectorName];
         JSValue *overideFunction = _JSOverideMethods[superCls][JPSelectorName];
         if (overideFunction) {
@@ -999,7 +1009,7 @@ static id callSelector(NSString *className, NSString *selectorName, JSValue *arg
     
     
     NSMutableArray *_markArray;
-    
+//    把参数等信息封装成NSInvocation对象，并执行，然后返回结果；
     NSInvocation *invocation;
     NSMethodSignature *methodSignature;
     if (!_JSMethodSignatureCache) {
@@ -1172,7 +1182,7 @@ static id callSelector(NSString *className, NSString *selectorName, JSValue *arg
         if (strncmp(returnType, "@", 1) == 0) {
             void *result;
             [invocation getReturnValue:&result];
-            
+//            常用在CF对象转化成OC对象时，将CF对象的所有权交给OC对象，此时ARC就能自动管理该内存,作用同CFBridgingRelease()
             //For performance, ignore the other methods prefix with alloc/new/copy/mutableCopy
             if ([selectorName isEqualToString:@"alloc"] || [selectorName isEqualToString:@"new"] ||
                 [selectorName isEqualToString:@"copy"] || [selectorName isEqualToString:@"mutableCopy"]) {
@@ -1556,7 +1566,7 @@ static void garbageCollect(JSContext __weak *context) {
 }
 
 #pragma mark - Object format
-
+//组装成js 传递
 static id formatOCToJS(id obj)
 {
     if ([obj isKindOfClass:[NSString class]] || [obj isKindOfClass:[NSDictionary class]] || [obj isKindOfClass:[NSArray class]] || [obj isKindOfClass:[NSDate class]]) {

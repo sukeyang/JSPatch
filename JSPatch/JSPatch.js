@@ -4,7 +4,7 @@ var global = this
 
   var _ocCls = {};
   var _jsCls = {};
-
+  //转换城js对象
   var _formatOCToJS = function(obj) {
     if (obj === undefined || obj === null) return false
     if (typeof obj == "object") {
@@ -18,6 +18,7 @@ var global = this
       })
       return ret
     }
+  //不懂
     if (obj instanceof Function) {
         return function() {
             var args = Array.prototype.slice.call(arguments)
@@ -42,6 +43,7 @@ var global = this
     return obj
   }
   
+  //方法调用
   var _methodFunc = function(instance, clsName, methodName, args, isSuper, isPerformSelector) {
     var selectorName = methodName
     if (!isPerformSelector) {
@@ -157,7 +159,9 @@ var global = this
     })
     return lastRequire
   }
-
+  
+  //新的方法列表,修改为新的
+//  传递参数个数的目的是，runtime在修复类的时候，无法直接解析原始的js实现函数，那么就不知道参数的个数，特别是在创建新的方法的时候，需要根据参数个数生成方法签名，所以只能在js端拿到js函数的参数个数，传递到OC端。
   var _formatDefineMethods = function(methods, newMethods, realClsName) {
     for (var methodName in methods) {
       if (!(methods[methodName] instanceof Function)) return;
@@ -166,14 +170,17 @@ var global = this
         newMethods[methodName] = [originMethod.length, function() {
           try {
             var args = _formatOCToJS(Array.prototype.slice.call(arguments))
+        //self的处理，在js修复代码中我们可以像在OC中一样使用self；
             var lastSelf = global.self
             global.self = args[0]
             if (global.self) global.self.__realClsName = realClsName
+        //  args.splice(0,1)删除前两个参数：
             args.splice(0,1)
             var ret = originMethod.apply(originMethod, args)
             global.self = lastSelf
             return ret
           } catch(e) {
+                                  
             _OC_catch(e.message, e.stack)
           }
         }]
@@ -200,19 +207,22 @@ var global = this
     }
   }
 
+  //类名字  instMethods 方法
   global.defineClass = function(declaration, properties, instMethods, clsMethods) {
+  //缺省
     var newInstMethods = {}, newClsMethods = {}
     if (!(properties instanceof Array)) {
       clsMethods = instMethods
       instMethods = properties
       properties = null
     }
-
+// 类名字
     var realClsName = declaration.split(':')[0].trim()
 
     _formatDefineMethods(instMethods, newInstMethods, realClsName)
     _formatDefineMethods(clsMethods, newClsMethods, realClsName)
-
+  
+  //在oc创建类和方法
     var ret = _OC_defineClass(declaration, newInstMethods, newClsMethods)
     var className = ret['cls']
     var superCls = ret['superCls']
