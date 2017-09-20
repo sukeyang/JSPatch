@@ -263,7 +263,8 @@ var global = this
       var ret = _OC_defineProtocol(declaration, instProtos,clsProtos);
       return ret
   }
-
+//  例如callback需要透传到其他方法，在OC里是这样调用：[self handleCallback:callback]
+//  在这里callback已是JS函数，需要再包一层block：
   global.block = function(args, cb) {
     var that = this
     var slf = global.self
