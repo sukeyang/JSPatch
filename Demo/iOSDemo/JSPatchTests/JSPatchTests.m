@@ -17,6 +17,8 @@
 #import "JPJSClassTest.h"
 #import "JPMemory.h"
 #import "JPPerformanceTest.h"
+#import "JPCFunctionTest.h"
+#import "JPNumberTest.h"
 
 @interface JSPatchTests : XCTestCase
 
@@ -52,6 +54,12 @@
     
     XCTAssert(obj.funcReturnStringPassed, @"funcReturnStringPassed");
     
+    XCTAssert(obj.funcReturnClassPassed, @"funcReturnClassPassed");
+    
+    // Test for functions which return double/float, cause there's a fatal bug in NSInvocation on iOS7.0
+    // This case shall fail if you comment line 957~959 in JPEngine.m on iOS7.0.
+    XCTAssert(obj.funcReturnDoublePassed, @"funcReturnDoublePassed");
+    
     XCTAssert(obj.funcWithIntPassed, @"funcWithIntPassed");
     XCTAssert(obj.funcWithNilPassed, @"funcWithNilPassed");
     XCTAssert(obj.funcReturnNilPassed, @"funcReturnNilPassed");
@@ -66,6 +74,7 @@
     XCTAssert(obj.funcWithSizeAndReturnSizePassed, @"funcWithSizeAndReturnSizePassed");
     XCTAssert(obj.funcWithPointAndReturnPointPassed, @"funcWithPointAndReturnPointPassed");
     XCTAssert(obj.funcWithRangeAndReturnRangePassed, @"funcWithRangeAndReturnRangePassed");
+    XCTAssert(obj.funcWithClassAndReturnStringPassed, @"funcWithClassAndReturnInstancePassed");
     
     XCTAssert(obj.funcReturnViewWithFramePassed, @"funcReturnViewWithFramePassed");
     XCTAssert(obj.funcWithViewAndReturnViewPassed, @"funcWithViewAndReturnViewPassed");
@@ -79,12 +88,15 @@
     XCTAssert(obj.funcReturnBlockPassed, @"funcReturnBlockPassed");
     XCTAssert(obj.funcReturnObjectBlockPassed, @"funcReturnObjectBlockPassed");
     XCTAssert(obj.funcReturnObjectBlockReturnValuePassed, @"funcReturnObjectBlockReturnValuePassed");
+    XCTAssert(obj.funcReturnJSBlockPassed, @"funcReturnBlockPassed");
     XCTAssert(obj.callBlockWithStringAndIntPassed, @"callBlockWithStringAndIntPassed");
     XCTAssert(obj.callBlockWithStringAndIntReturnValuePassed, @"callBlockWithStringAndIntReturnValuePassed");
     XCTAssert(obj.callBlockWithArrayAndViewPassed, @"callBlockWithArrayAndViewPassed");
     XCTAssert(obj.callBlockWithBoolAndBlockPassed, @"callBlockWithBoolAndBlockPassed");
     XCTAssert(obj.callBlockWithObjectAndBlockPassed, @"callBlockWithObjectAndBlockPassed");
     XCTAssert(obj.callBlockWithObjectAndBlockReturnValuePassed, @"callBlockWithObjectAndBlockReturnValuePassed");
+    XCTAssert(obj.callBlockWithDoubleAndReturnDoublePassed, @"callBlockWithDoubleAndReturnDoublePassed");
+    
     
     XCTAssert(obj.funcToSwizzleWithStringViewIntPassed, @"funcToSwizzleWithStringViewIntPassed");
     XCTAssert(obj.funcToSwizzleViewPassed, @"funcToSwizzleViewPassed");
@@ -111,6 +123,7 @@
     XCTAssert(obj.funcToSwizzleTestClassPassed, @"funcToSwizzleTestClassPassed");
     XCTAssert(obj.funcToSwizzleTestSelectorPassed, @"funcToSwizzleTestSelectorPassed");
     XCTAssert(obj.funcToSwizzleTestCharPassed, @"funcToSwizzleTestCharPassed");
+    XCTAssert(obj.funcToSwizzleTestClassPassed,@"funcToSwizzleTestClassPassed");
     XCTAssert(obj.funcTestCharPassed, @"funcTestCharPassed");
     XCTAssert(obj.funcToSwizzleTestPointerPassed, @"funcToSwizzleTestPointerPassed");
     XCTAssert(obj.funcTestPointerPassed, @"funcTestPointerPassed");
@@ -138,10 +151,20 @@
     XCTAssert(obj.classFuncToSwizzleReturnObjPassed, @"classFuncToSwizzleReturnObjPassed");
     XCTAssert(obj.classFuncToSwizzleReturnObjCalledOriginalPassed, @"classFuncToSwizzleReturnObjCalledOriginalPassed");
     XCTAssert(obj.classFuncToSwizzleReturnIntPassed, @"classFuncToSwizzleReturnIntPassed");
+    // Test for functions which return double/float, cause there's a fatal bug in NSInvocation on iOS7.0
+    // This case shall fail if you comment line 1050~1052 in JPEngine.m on iOS7.0.
+    XCTAssert(obj.classFuncToSwizzleReturnDoublePassed, @"classFuncToSwizzleReturnDoublePassed");
     
     XCTAssert(subObj.funcCallSuperSubObjectPassed, @"funcCallSuperSubObjectPassed");
     XCTAssert(subObj.funcCallSuperPassed, @"funcCallSuperPassed");
     XCTAssert(obj.callForwardInvocationPassed, @"callForwardInvocationPassed");
+    
+    JPTestSwizzledForwardInvocationSubObject *tmp = [[JPTestSwizzledForwardInvocationSubObject alloc] init];
+    [tmp callTestSwizzledSuperForwardInvocation];
+    XCTAssert(!tmp.callSwizzledSuperForwardInvocationPassed);
+    [tmp swizzleSuperForwoardInvocation];
+    [tmp callTestSwizzledSuperForwardInvocation];
+    XCTAssert(tmp.callSwizzledSuperForwardInvocationPassed);
     
     XCTAssert(obj.propertySetFramePassed, @"propertySetFramePassed");
     XCTAssert(obj.propertySetViewPassed, @"propertySetViewPassed");
@@ -260,6 +283,28 @@
 }
 
 
+- (void)testCFunction
+{
+    [self loadPatch:@"jsCFunctionTest"];
+    XCTAssert([JPCFunctionTest testCfuncWithCGSize], @"testCfuncWithCGSize");
+    XCTAssert([JPCFunctionTest testCfuncWithCGRect], @"testCfuncWithCGRect");
+    XCTAssert([JPCFunctionTest testCfuncWithId], @"testCfuncWithId");
+    XCTAssert([JPCFunctionTest testCfuncWithInt], @"testCfuncWithInt");
+    XCTAssert([JPCFunctionTest testCfuncWithCGFloat], @"testCfuncWithCGFloat");
+    XCTAssert([JPCFunctionTest testCfuncReturnPointer], @"testCfuncReturnPointer");
+    XCTAssert([JPCFunctionTest testCFunctionReturnClass], @"testCFunctionReturnClass");
+    XCTAssert([JPCFunctionTest testCFunctionVoid], @"testCFunctionVoid");
+}
+
+#pragma mark - jsNumberTest
+
+- (void)testJPNumber {
+    [self loadPatch:@"jsNumberTest"];
+    XCTAssert([JPNumberTest testJPNumNSNumber], @"testJPNumNSNumber");
+    XCTAssert([JPNumberTest testJPNumNSDecimalNumber], @"testJPNumNSDecimalNumber");
+    XCTAssert([JPNumberTest testJPNumToJS], @"testJPNumToJS");
+    XCTAssert([JPNumberTest testJPNUmToOC], @"testJPNumToOC");
+}
 
 #pragma mark - multithreadTest
 
@@ -413,6 +458,24 @@ void thread(void* context)
     JPPerformanceTest *obj = [[JPPerformanceTest alloc] init];
     [self measureBlock:^{
         [obj testJSCallJSMethodWithLargeDictionaryParamAutoConvert];
+    }];
+}
+
+- (void)testJSCallMallocJPMemory
+{
+    [self loadPatch:@"performanceTest"];
+    JPPerformanceTest *obj = [[JPPerformanceTest alloc] init];
+    [self measureBlock:^{
+        [obj testJSCallMallocJPMemory];
+    }];
+}
+
+- (void)testJSCallMallocJPCFunction
+{
+    [self loadPatch:@"performanceTest"];
+    JPPerformanceTest *obj = [[JPPerformanceTest alloc] init];
+    [self measureBlock:^{
+        [obj testJSCallMallocJPCFunction];
     }];
 }
 

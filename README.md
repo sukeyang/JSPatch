@@ -1,9 +1,11 @@
 # JSPatch
-[![Travis](https://img.shields.io/travis/bang590/JSPatch.svg)](https://github.com/bang590/JSPatch)
+[![Travis](https://img.shields.io/travis/bang590/JSPatch.svg)](https://travis-ci.org/bang590/JSPatch)
 ![CocoaPods Version](https://img.shields.io/cocoapods/v/JSPatch.svg?style=flat)
 [![License](https://img.shields.io/github/license/bang590/JSPatch.svg?style=flat)](https://github.com/bang590/JSPatch/blob/master/LICENSE)
 
-[中文介绍](https://github.com/bang590/JSPatch/blob/master/README-CN.md) | [文档](https://github.com/bang590/JSPatch/wiki)
+[中文介绍](https://github.com/bang590/JSPatch/blob/master/README-CN.md) | [文档](https://github.com/bang590/JSPatch/wiki) | [JSPatch平台](http://jspatch.com)
+
+**请大家不要自行接入 JSPatch，统一接入 JSPatch 平台，让热修复在一个安全和可控的环境下使用。原因详见 [这里](http://jspatch.com/Docs/appleFAQ)**
 
 JSPatch bridges Objective-C and JavaScript using the Objective-C runtime. You can call any Objective-C class and method in JavaScript by just including a small engine. That makes the APP obtaining the power of script language: add modules or replacing Objective-C code to fix bugs dynamically.
 
@@ -163,7 +165,7 @@ Go to wiki page for more details: [Base Usage](https://github.com/bang590/JSPatc
 
 
 
-####defineClass
+#### defineClass
 You can redefine an existing class and override methods.
 
 ```objc
@@ -210,7 +212,7 @@ defineClass("JPTableViewController", {
 
 Go to wiki page for more details: [Usage of defineClass](https://github.com/bang590/JSPatch/wiki/Usage-of-defineClass)
 
-####Extensions
+#### Extensions
 
 There are some extensions provide support for custom struct type, C methods and other functional, call `+addExtensions:` after starting engine to add extensions:
 

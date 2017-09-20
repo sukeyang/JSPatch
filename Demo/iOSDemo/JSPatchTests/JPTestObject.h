@@ -13,6 +13,8 @@
 - (void)funcWithInt:(int)intValue;
 @property (nonatomic, assign) BOOL funcReturnVoidPassed;
 @property (nonatomic, assign) BOOL funcReturnStringPassed;
+@property (nonatomic, assign) BOOL funcReturnDoublePassed;
+@property (nonatomic, assign) BOOL funcReturnClassPassed;
 @property (nonatomic, assign) BOOL funcReturnViewWithFramePassed;
 @property (nonatomic, assign) BOOL funcWithViewAndReturnViewPassed;
 
@@ -31,6 +33,7 @@
 @property (nonatomic, assign) BOOL funcWithRectAndReturnRectPassed;
 @property (nonatomic, assign) BOOL funcWithPointAndReturnPointPassed;
 @property (nonatomic, assign) BOOL funcWithSizeAndReturnSizePassed;
+@property (nonatomic, assign) BOOL funcWithClassAndReturnStringPassed;
 
 @property (nonatomic, assign) BOOL funcReturnDictStringIntPassed;
 @property (nonatomic, assign) BOOL funcReturnDictStringViewPassed;
@@ -41,12 +44,14 @@
 @property (nonatomic, assign) BOOL funcReturnBlockPassed;
 @property (nonatomic, assign) BOOL funcReturnObjectBlockPassed;
 @property (nonatomic, assign) BOOL funcReturnObjectBlockReturnValuePassed;
+@property (nonatomic, assign) BOOL funcReturnJSBlockPassed;
 @property (nonatomic, assign) BOOL callBlockWithStringAndIntPassed;
 @property (nonatomic, assign) BOOL callBlockWithStringAndIntReturnValuePassed;
 @property (nonatomic, assign) BOOL callBlockWithArrayAndViewPassed;
 @property (nonatomic, assign) BOOL callBlockWithBoolAndBlockPassed;
 @property (nonatomic, assign) BOOL callBlockWithObjectAndBlockPassed;
 @property (nonatomic, assign) BOOL callBlockWithObjectAndBlockReturnValuePassed;
+@property (nonatomic, assign) BOOL callBlockWithDoubleAndReturnDoublePassed;
 
 
 @property (nonatomic, assign) BOOL funcToSwizzleWithStringViewIntPassed;
@@ -71,6 +76,7 @@
 @property (nonatomic, assign) BOOL funcToSwizzleTestClassPassed;
 @property (nonatomic, assign) BOOL funcToSwizzleTestSelectorPassed;
 @property (nonatomic, assign) BOOL funcToSwizzleTestCharPassed;
+@property (nonatomic, assign) BOOL funcToSwizzleReturnClassPassed;
 @property (nonatomic, assign) BOOL funcTestCharPassed;
 @property (nonatomic, assign) BOOL funcToSwizzleTestPointerPassed;
 @property (nonatomic, assign) BOOL funcTestPointerPassed;
@@ -82,6 +88,7 @@
 @property (nonatomic, assign) BOOL classFuncToSwizzleReturnObjPassed;
 @property (nonatomic, assign) BOOL classFuncToSwizzleReturnObjCalledOriginalPassed;
 @property (nonatomic, assign) BOOL classFuncToSwizzleReturnIntPassed;
+@property (nonatomic, assign) BOOL classFuncToSwizzleReturnDoublePassed;
 
 
 @property (nonatomic, assign) BOOL funcCallSuperPassed;
@@ -135,4 +142,18 @@
 
 @interface JPTestProtocolObject : NSObject <JPTestProtocol, JPTestProtocol2>
 - (BOOL)testProtocolMethods;
+@end
+
+@interface JPTestSwizzledForwardInvocationSuperObject : NSObject
+
+@property (nonatomic, assign) BOOL callSwizzledSuperForwardInvocationPassed;
+
+- (void)swizzleSuperForwoardInvocation;
+
+@end
+
+@interface JPTestSwizzledForwardInvocationSubObject : JPTestSwizzledForwardInvocationSuperObject
+
+- (void)callTestSwizzledSuperForwardInvocation;
+
 @end

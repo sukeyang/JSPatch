@@ -13,22 +13,11 @@
 #import <UIKit/UIApplication.h>
 #endif
 
-/**
- *  JavaScript Force Garbage collention
- *  @See: http://stackoverflow.com/questions/35689482/force-garbage-collection-of-javascriptcore-virtual-machine-on-ios
- */
-JS_EXPORT void JSSynchronousGarbageCollectForDebugging(JSContextRef ctx);
-
-@interface JPBoxing : NSObject
-@property (nonatomic) id obj;
-@property (nonatomic) void *pointer;
-@property (nonatomic) Class cls;
-@property (nonatomic, weak) id weakObj;
-@property (nonatomic, assign) id assignObj;
-- (id)unbox;
-- (void *)unboxPointer;
-- (Class)unboxClass;
-@end
+#if CGFLOAT_IS_DOUBLE
+#define CGFloatValue doubleValue
+#else
+#define CGFloatValue floatValue
+#endif
 
 @implementation JPBoxing
 
@@ -51,6 +40,7 @@ JPBOXING_GEN(boxAssignObj, assignObj, id)
     if (self.obj) return self.obj;
     if (self.weakObj) return self.weakObj;
     if (self.assignObj) return self.assignObj;
+    if (self.cls) return self.cls;
     return self;
 }
 - (void *)unboxPointer
@@ -63,6 +53,79 @@ JPBOXING_GEN(boxAssignObj, assignObj, id)
 }
 @end
 
+#pragma mark - Fix iOS7 NSInvocation fatal error
+// A fatal error of NSInvocation on iOS7.0.
+// A invocation return 0 when the return type is double/float.
+// http://stackoverflow.com/questions/19874502/nsinvocation-getreturnvalue-with-double-value-produces-0-unexpectedly
+
+typedef struct {double d;} JPDouble;
+typedef struct {float f;} JPFloat;
+
+static NSMethodSignature *fixSignature(NSMethodSignature *signature)
+{
+#if TARGET_OS_IPHONE
+#ifdef __LP64__
+    if (!signature) {
+        return nil;
+    }
+    
+    if ([[UIDevice currentDevice].systemVersion floatValue] < 7.09) {
+        BOOL isReturnDouble = (strcmp([signature methodReturnType], "d") == 0);
+        BOOL isReturnFloat = (strcmp([signature methodReturnType], "f") == 0);
+
+        if (isReturnDouble || isReturnFloat) {
+            NSMutableString *types = [NSMutableString stringWithFormat:@"%s@:", isReturnDouble ? @encode(JPDouble) : @encode(JPFloat)];
+            for (int i = 2; i < signature.numberOfArguments; i++) {
+                const char *argType = [signature getArgumentTypeAtIndex:i];
+                [types appendFormat:@"%s", argType];
+            }
+            signature = [NSMethodSignature signatureWithObjCTypes:[types UTF8String]];
+        }
+    }
+#endif
+#endif
+    return signature;
+}
+
+@interface NSObject (JPFix)
+- (NSMethodSignature *)jp_methodSignatureForSelector:(SEL)aSelector;
++ (void)jp_fixMethodSignature;
+@end
+
+@implementation NSObject (JPFix)
+const static void *JPFixedFlagKey = &JPFixedFlagKey;
+- (NSMethodSignature *)jp_methodSignatureForSelector:(SEL)aSelector
+{
+    NSMethodSignature *signature = [self jp_methodSignatureForSelector:aSelector];
+    return fixSignature(signature);
+}
++ (void)jp_fixMethodSignature
+{
+#if TARGET_OS_IPHONE
+#ifdef __LP64__
+    if ([[UIDevice currentDevice].systemVersion floatValue] < 7.1) {
+        NSNumber *flag = objc_getAssociatedObject(self, JPFixedFlagKey);
+        if (!flag.boolValue) {
+            SEL originalSelector = @selector(methodSignatureForSelector:);
+            SEL swizzledSelector = @selector(jp_methodSignatureForSelector:);
+            Method originalMethod = class_getInstanceMethod(self, originalSelector);
+            Method swizzledMethod = class_getInstanceMethod(self, swizzledSelector);
+            BOOL didAddMethod = class_addMethod(self, originalSelector, method_getImplementation(swizzledMethod), method_getTypeEncoding(swizzledMethod));
+            if (didAddMethod) {
+                class_replaceMethod(self, swizzledSelector, method_getImplementation(originalMethod), method_getTypeEncoding(originalMethod));
+            } else {
+                method_exchangeImplementations(originalMethod, swizzledMethod);
+            }
+            objc_setAssociatedObject(self, JPFixedFlagKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+    }
+#endif
+#endif
+}
+@end
+
+#pragma mark -
+
 static JSContext *_context;
 static NSString *_regexStr = @"(?<!\\\\)\\.\\s*(\\w+)\\s*\\(";
 static NSString *_replaceStr = @".__c(\"$1\")(";
@@ -70,7 +133,7 @@ static NSRegularExpression* _regex;
 static NSObject *_nullObj;
 static NSObject *_nilObj;
 static NSMutableDictionary *_registeredStruct;
-static NSString *_currInvokeSuperClsName;
+static NSMutableDictionary *_currInvokeSuperClsName;
 static char *kPropAssociatedObjectKey;
 static BOOL _autoConvert;
 static BOOL _convertOCNumberToString;
@@ -86,9 +149,18 @@ static NSRecursiveLock     *_JSMethodForwardCallLock;
 static NSMutableDictionary *_protocolTypeEncodeDict;
 static NSMutableArray      *_pointersToRelease;
 
-static NSOperationQueue *_garbageCollectOperationQueue;
+#ifdef DEBUG
+static NSArray *_JSLastCallStack;
+#endif
+
+static void (^_exceptionBlock)(NSString *log) = ^void(NSString *log) {
+    NSCAssert(NO, log);
+};
 
 @implementation JPEngine
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wundeclared-selector"
 
 #pragma mark - APIS
 
@@ -100,6 +172,17 @@ static NSOperationQueue *_garbageCollectOperationQueue;
     
     JSContext *context = [[JSContext alloc] init];
     
+#ifdef DEBUG
+    context[@"po"] = ^JSValue*(JSValue *obj) {
+        id ocObject = formatJSToOC(obj);
+        return [JSValue valueWithObject:[ocObject description] inContext:_context];
+    };
+
+    context[@"bt"] = ^JSValue*() {
+        return [JSValue valueWithObject:_JSLastCallStack inContext:_context];
+    };
+#endif
+
     context[@"_OC_defineClass"] = ^(NSString *classDeclaration, JSValue *instanceMethods, JSValue *classMethods) {
         return defineClass(classDeclaration, instanceMethods, classMethods);
     };
@@ -208,11 +291,6 @@ static NSOperationQueue *_garbageCollectOperationQueue;
         }
     };
     
-    __weak __typeof(_context) weakCtx = _context;
-    context[@"garbageCollect"] = ^void() {
-        garbageCollect(weakCtx);
-    };
-
     context[@"_OC_log"] = ^() {
         NSArray *args = [JSContext currentArguments];
         for (JSValue *jsVal in args) {
@@ -222,12 +300,12 @@ static NSOperationQueue *_garbageCollectOperationQueue;
     };
     
     context[@"_OC_catch"] = ^(JSValue *msg, JSValue *stack) {
-        NSAssert(NO, @"js exception, \nmsg: %@, \nstack: \n %@", [msg toObject], [stack toObject]);
+        _exceptionBlock([NSString stringWithFormat:@"js exception, \nmsg: %@, \nstack: \n %@", [msg toObject], [stack toObject]]);
     };
     
     context.exceptionHandler = ^(JSContext *con, JSValue *exception) {
         NSLog(@"%@", exception);
-        NSAssert(NO, @"js exception: %@", exception);
+        _exceptionBlock([NSString stringWithFormat:@"js exception: %@", exception]);
     };
     
     _nullObj = [[NSObject alloc] init];
@@ -239,26 +317,20 @@ static NSOperationQueue *_garbageCollectOperationQueue;
     _JSMethodSignatureLock = [[NSLock alloc] init];
     _JSMethodForwardCallLock = [[NSRecursiveLock alloc] init];
     _registeredStruct = [[NSMutableDictionary alloc] init];
+    _currInvokeSuperClsName = [[NSMutableDictionary alloc] init];
     
 #if TARGET_OS_IPHONE
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleMemoryWarning) name:UIApplicationDidReceiveMemoryWarningNotification object:nil];
 #endif
     
     NSString *path = [[NSBundle bundleForClass:[self class]] pathForResource:@"JSPatch" ofType:@"js"];
-    NSAssert(path, @"can't find JSPatch.js");
+    if (!path) _exceptionBlock(@"can't find JSPatch.js");
     NSString *jsCore = [[NSString alloc] initWithData:[[NSFileManager defaultManager] contentsAtPath:path] encoding:NSUTF8StringEncoding];
     
     if ([_context respondsToSelector:@selector(evaluateScript:withSourceURL:)]) {
         [_context evaluateScript:jsCore withSourceURL:[NSURL URLWithString:@"JSPatch.js"]];
     } else {
         [_context evaluateScript:jsCore];
-    }
-    
-    if (!_garbageCollectOperationQueue) {
-        _garbageCollectOperationQueue = [NSOperationQueue currentQueue];
-    }
-    else {
-        [_garbageCollectOperationQueue cancelAllOperations];
     }
 }
 
@@ -282,18 +354,16 @@ static NSOperationQueue *_garbageCollectOperationQueue;
 + (JSValue *)_evaluateScript:(NSString *)script withSourceURL:(NSURL *)resourceURL
 {
     if (!script || ![JSContext class]) {
-        NSAssert(script, @"script is nil");
+        _exceptionBlock(@"script is nil");
         return nil;
     }
+    [self startEngine];
     
     if (!_regex) {
         _regex = [NSRegularExpression regularExpressionWithPattern:_regexStr options:0 error:nil];
     }
-//    用新字段替换原文本中的对应字段，并返回操作后的NSString
-    NSString *formatedScript = [NSString stringWithFormat:@";(function(){try{%@}catch(e){_OC_catch(e.message, e.stack)}})();", [_regex stringByReplacingMatchesInString:script options:0 range:NSMakeRange(0, script.length) withTemplate:_replaceStr]];
+    NSString *formatedScript = [NSString stringWithFormat:@";(function(){try{\n%@\n}catch(e){_OC_catch(e.message, e.stack)}})();", [_regex stringByReplacingMatchesInString:script options:0 range:NSMakeRange(0, script.length) withTemplate:_replaceStr]];
     @try {
-//        (?<!\\)\.\s*(\w+)\s*\(      .__c("$1")(
-        //替换函数.self.navigationController()为__c("navigationController")()
         if ([_context respondsToSelector:@selector(evaluateScript:withSourceURL:)]) {
             return [_context evaluateScript:formatedScript withSourceURL:resourceURL];
         } else {
@@ -301,7 +371,7 @@ static NSOperationQueue *_garbageCollectOperationQueue;
         }
     }
     @catch (NSException *exception) {
-        NSAssert(NO, @"%@", exception);
+        _exceptionBlock([NSString stringWithFormat:@"%@", exception]);
     }
     return nil;
 }
@@ -316,7 +386,7 @@ static NSOperationQueue *_garbageCollectOperationQueue;
     if (![JSContext class]) {
         return;
     }
-    NSAssert(_context, @"please call [JPEngine startEngine]");
+    if (!_context) _exceptionBlock(@"please call [JPEngine startEngine]");
     for (NSString *className in extensions) {
         Class extCls = NSClassFromString(className);
         [extCls main:_context];
@@ -334,6 +404,11 @@ static NSOperationQueue *_garbageCollectOperationQueue;
     [_JSMethodSignatureLock lock];
     _JSMethodSignatureCache = nil;
     [_JSMethodSignatureLock unlock];
+}
+
++ (void)handleException:(void (^)(NSString *msg))exceptionBlock
+{
+    _exceptionBlock = [exceptionBlock copy];
 }
 
 #pragma mark - Implements
@@ -452,7 +527,7 @@ static void addGroupMethodsToProtocol(Protocol* protocol,JSValue *groupMethods,B
                         if (NSClassFromString(argClassName) != NULL) {
                             argEncode = @"@";
                         } else {
-                            NSCAssert(NO, @"unreconized type %@", argStr);
+                            _exceptionBlock([NSString stringWithFormat:@"unreconized type %@", argStr]);
                             return;
                         }
                     }
@@ -471,11 +546,10 @@ static void addMethodToProtocol(Protocol* protocol, NSString *selectorName, NSSt
     protocol_addMethodDescription(protocol, sel, type, YES, isInstance);
 }
 
-//定了一个名为defineClass的函数，这个函数对类进行真正的重写操作
 static NSDictionary *defineClass(NSString *classDeclaration, JSValue *instanceMethods, JSValue *classMethods)
 {
     NSScanner *scanner = [NSScanner scannerWithString:classDeclaration];
-//    首先是对类名进行解析，把协议名、类名、父类名都解析出来。如果类不存在，那么创建并注册该类
+    
     NSString *className;
     NSString *superClassName;
     NSString *protocolNames;
@@ -499,7 +573,7 @@ static NSDictionary *defineClass(NSString *classDeclaration, JSValue *instanceMe
     if (!cls) {
         Class superCls = NSClassFromString(superClassName);
         if (!superCls) {
-            NSCAssert(NO, @"can't find the super class %@", superClassName);
+            _exceptionBlock([NSString stringWithFormat:@"can't find the super class %@", superClassName]);
             return @{@"cls": className};
         }
         cls = objc_allocateClassPair(superCls, className.UTF8String, 0);
@@ -521,15 +595,13 @@ static NSDictionary *defineClass(NSString *classDeclaration, JSValue *instanceMe
         NSDictionary *methodDict = [jsMethods toDictionary];
         for (NSString *jsMethodName in methodDict.allKeys) {
             JSValue *jsMethodArr = [jsMethods valueForProperty:jsMethodName];
-            //参数个数
             int numberOfArg = [jsMethodArr[0] toInt32];
-            //替换方法名字 __ 到-
             NSString *selectorName = convertJPSelectorString(jsMethodName);
-            //修正
+            
             if ([selectorName componentsSeparatedByString:@":"].count - 1 < numberOfArg) {
                 selectorName = [selectorName stringByAppendingString:@":"];
             }
-            //方法
+            
             JSValue *jsMethod = jsMethodArr[1];
             if (class_respondsToSelector(currCls, NSSelectorFromString(selectorName))) {
                 overrideMethod(currCls, selectorName, jsMethod, !isInstance, NULL);
@@ -558,27 +630,23 @@ static NSDictionary *defineClass(NSString *classDeclaration, JSValue *instanceMe
         }
     }
     
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wundeclared-selector"
     class_addMethod(cls, @selector(getProp:), (IMP)getPropIMP, "@@:@");
     class_addMethod(cls, @selector(setProp:forKey:), (IMP)setPropIMP, "v@:@@");
-#pragma clang diagnostic pop
 
     return @{@"cls": className, @"superCls": superClassName};
 }
 
-static JSValue* getJSFunctionInObjectHierachy(id slf, NSString *selectorName)
+static JSValue *getJSFunctionInObjectHierachy(id slf, NSString *selectorName)
 {
     Class cls = object_getClass(slf);
-    if (_currInvokeSuperClsName) {
-        cls = NSClassFromString(_currInvokeSuperClsName);
+    if (_currInvokeSuperClsName[selectorName]) {
+        cls = NSClassFromString(_currInvokeSuperClsName[selectorName]);
         selectorName = [selectorName stringByReplacingOccurrencesOfString:@"_JPSUPER_" withString:@"_JP"];
     }
     JSValue *func = _JSOverideMethods[cls][selectorName];
     while (!func) {
         cls = class_getSuperclass(cls);
         if (!cls) {
-            NSCAssert(NO, @"warning can not find selector %@", selectorName);
             return nil;
         }
         func = _JSOverideMethods[cls][selectorName];
@@ -586,10 +654,11 @@ static JSValue* getJSFunctionInObjectHierachy(id slf, NSString *selectorName)
     return func;
 }
 
-#pragma clang diagnostic pop
-
 static void JPForwardInvocation(__unsafe_unretained id assignSlf, SEL selector, NSInvocation *invocation)
 {
+#ifdef DEBUG
+    _JSLastCallStack = [NSThread callStackSymbols];
+#endif
     BOOL deallocFlag = NO;
     id slf = assignSlf;
     NSMethodSignature *methodSignature = [invocation methodSignature];
@@ -597,13 +666,12 @@ static void JPForwardInvocation(__unsafe_unretained id assignSlf, SEL selector, 
     
     NSString *selectorName = NSStringFromSelector(invocation.selector);
     NSString *JPSelectorName = [NSString stringWithFormat:@"_JP%@", selectorName];
-    SEL JPSelector = NSSelectorFromString(JPSelectorName);
-//    把selector前面加上 _JP,构成的新的selector，正好是上一步中我们添加的新方法，如果class无法识别，说明这个不是我们重写的方法，那么走原来的消息转发，上一节中介绍过了
-    if (!class_respondsToSelector(object_getClass(slf), JPSelector)) {
-        JPExcuteORIGForwardInvocation(slf, selector, invocation);
+    JSValue *jsFunc = getJSFunctionInObjectHierachy(slf, JPSelectorName);
+    if (!jsFunc) {
+        JPExecuteORIGForwardInvocation(slf, selector, invocation);
         return;
     }
-//    把self和其他的参数都转换称js对象，我们知道js端重写的函数，传递过来是JSValue类型，这里对应着js函数，我们可以对其调用callWithArgument方法，所以参数也要是js对象，把js对象参数传递过去，执行函数。上文提到过，类型的转换在原理详解blog中有介绍。
+    
     NSMutableArray *argList = [[NSMutableArray alloc] init];
     if ([slf class] == slf) {
         [argList addObject:[JSValue valueWithObject:@{@"__clsName": NSStringFromClass([slf class])} inContext:_context]];
@@ -706,13 +774,13 @@ static void JPForwardInvocation(__unsafe_unretained id assignSlf, SEL selector, 
         }
     }
     
-    if (_currInvokeSuperClsName) {
-        Class cls = NSClassFromString(_currInvokeSuperClsName);
+    if (_currInvokeSuperClsName[selectorName]) {
+        Class cls = NSClassFromString(_currInvokeSuperClsName[selectorName]);
         NSString *tmpSelectorName = [[selectorName stringByReplacingOccurrencesOfString:@"_JPSUPER_" withString:@"_JP"] stringByReplacingOccurrencesOfString:@"SUPER_" withString:@"_JP"];
         if (!_JSOverideMethods[cls][tmpSelectorName]) {
             NSString *ORIGSelectorName = [selectorName stringByReplacingOccurrencesOfString:@"SUPER_" withString:@"ORIG"];
             [argList removeObjectAtIndex:0];
-            id retObj = callSelector(_currInvokeSuperClsName, ORIGSelectorName, [JSValue valueWithObject:argList inContext:_context], [JSValue valueWithObject:@{@"__obj": slf, @"__realClsName": @""} inContext:_context], NO);
+            id retObj = callSelector(_currInvokeSuperClsName[selectorName], ORIGSelectorName, [JSValue valueWithObject:argList inContext:_context], [JSValue valueWithObject:@{@"__obj": slf, @"__realClsName": @""} inContext:_context], NO);
             id __autoreleasing ret = formatJSToOC([JSValue valueWithObject:retObj inContext:_context]);
             [invocation setReturnValue:&ret];
             return;
@@ -720,14 +788,22 @@ static void JPForwardInvocation(__unsafe_unretained id assignSlf, SEL selector, 
     }
     
     NSArray *params = _formatOCToJSList(argList);
-    const char *returnType = [methodSignature methodReturnType];
+    char returnType[255];
+    strcpy(returnType, [methodSignature methodReturnType]);
+    
+    // Restore the return type
+    if (strcmp(returnType, @encode(JPDouble)) == 0) {
+        strcpy(returnType, @encode(double));
+    }
+    if (strcmp(returnType, @encode(JPFloat)) == 0) {
+        strcpy(returnType, @encode(float));
+    }
 
     switch (returnType[0] == 'r' ? returnType[1] : returnType[0]) {
         #define JP_FWD_RET_CALL_JS \
-            JSValue *fun = getJSFunctionInObjectHierachy(slf, JPSelectorName); \
             JSValue *jsval; \
             [_JSMethodForwardCallLock lock];   \
-            jsval = [fun callWithArguments:params]; \
+            jsval = [jsFunc callWithArguments:params]; \
             [_JSMethodForwardCallLock unlock]; \
             while (![jsval isNull] && ![jsval isUndefined] && [jsval hasProperty:@"__isPerformInOC"]) { \
                 NSArray *args = nil;  \
@@ -766,10 +842,8 @@ static void JPForwardInvocation(__unsafe_unretained id assignSlf, SEL selector, 
 
         #define JP_FWD_RET_CODE_CLASS    \
             Class ret;   \
-            id obj = formatJSToOC(jsval); \
-            if ([obj isKindOfClass:[JPBoxing class]]) { \
-                ret = [((JPBoxing *)obj) unboxClass]; \
-            }
+            ret = formatJSToOC(jsval);
+
 
         #define JP_FWD_RET_CODE_SEL    \
             SEL ret;   \
@@ -854,18 +928,14 @@ static void JPForwardInvocation(__unsafe_unretained id assignSlf, SEL selector, 
     }
 }
 
-static void JPExcuteORIGForwardInvocation(id slf, SEL selector, NSInvocation *invocation)
+static void JPExecuteORIGForwardInvocation(id slf, SEL selector, NSInvocation *invocation)
 {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wundeclared-selector"
     SEL origForwardSelector = @selector(ORIGforwardInvocation:);
-#pragma clang diagnostic pop
     
     if ([slf respondsToSelector:origForwardSelector]) {
-        
         NSMethodSignature *methodSignature = [slf methodSignatureForSelector:origForwardSelector];
         if (!methodSignature) {
-            NSCAssert(methodSignature, @"unrecognized selector -ORIGforwardInvocation: for instance %@", slf);
+            _exceptionBlock([NSString stringWithFormat:@"unrecognized selector -ORIGforwardInvocation: for instance %@", slf]);
             return;
         }
         NSInvocation *forwardInv= [NSInvocation invocationWithMethodSignature:methodSignature];
@@ -873,24 +943,12 @@ static void JPExcuteORIGForwardInvocation(id slf, SEL selector, NSInvocation *in
         [forwardInv setSelector:origForwardSelector];
         [forwardInv setArgument:&invocation atIndex:2];
         [forwardInv invoke];
-        
     } else {
-        NSString *superForwardName = @"JPSUPER_ForwardInvocation";
-        SEL superForwardSelector = NSSelectorFromString(superForwardName);
-        
-        if (![slf respondsToSelector:superForwardSelector]) {
-            Class superCls = [[slf class] superclass];
-            Method superForwardMethod = class_getInstanceMethod(superCls, @selector(forwardInvocation:));
-            IMP superForwardIMP = method_getImplementation(superForwardMethod);
-            class_addMethod([slf class], superForwardSelector, superForwardIMP, method_getTypeEncoding(superForwardMethod));
-        }
-        
-        NSMethodSignature *methodSignature = [slf methodSignatureForSelector:@selector(forwardInvocation:)];
-        NSInvocation *forwardInv= [NSInvocation invocationWithMethodSignature:methodSignature];
-        [forwardInv setTarget:slf];
-        [forwardInv setSelector:superForwardSelector];
-        [forwardInv setArgument:&invocation atIndex:2];
-        [forwardInv invoke];
+        Class superCls = [[slf class] superclass];
+        Method superForwardMethod = class_getInstanceMethod(superCls, @selector(forwardInvocation:));
+        void (*superForwardIMP)(id, SEL, NSInvocation *);
+        superForwardIMP = (void (*)(id, SEL, NSInvocation *))method_getImplementation(superForwardMethod);
+        superForwardIMP(slf, @selector(forwardInvocation:), invocation);
     }
 }
 
@@ -926,18 +984,15 @@ static void overrideMethod(Class cls, NSString *selectorName, JSValue *function,
             }
         }
     #endif
-//把selector对应的具体实现使用class_replaceMethod替换成_objc_msgForward，我们知道这个对应着消息转发机制。例如，本文的例子中点击button是不会执行空的handleBtn方法的，而是直接走消息转发的路径。
-    class_replaceMethod(cls, selector, msgForwardIMP, typeDescription);
-//    这一步的目的是如果原来的类已经实现了自定义的消息转发，重写了forwardInvocation方法。那么我们在上面一步中已经修改了forwardInvocation对应的方法实现怎么办？保存旧的forwardInvocation实现的意义就是，会在新的实现中判断，如果当前的selector不是被js修改重写过的，就执行旧的实现。
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wundeclared-selector"
-//    向class添加名为ORIGforwardInvocation的方法，实现是原始的forwardInvocation的IMP。
+
     if (class_getMethodImplementation(cls, @selector(forwardInvocation:)) != (IMP)JPForwardInvocation) {
         IMP originalForwardImp = class_replaceMethod(cls, @selector(forwardInvocation:), (IMP)JPForwardInvocation, "v@:@");
-        class_addMethod(cls, @selector(ORIGforwardInvocation:), originalForwardImp, "v@:@");
+        if (originalForwardImp) {
+            class_addMethod(cls, @selector(ORIGforwardInvocation:), originalForwardImp, "v@:@");
+        }
     }
-#pragma clang diagnostic pop
-//    向class添加名为ORIG＋selector，对应原始selector的IMP。JS 可以通过这个方法调用到原来的实现。
+
+    [cls jp_fixMethodSignature];
     if (class_respondsToSelector(cls, selector)) {
         NSString *originalSelectorName = [NSString stringWithFormat:@"ORIG%@", selectorName];
         SEL originalSelector = NSSelectorFromString(originalSelectorName);
@@ -945,29 +1000,31 @@ static void overrideMethod(Class cls, NSString *selectorName, JSValue *function,
             class_addMethod(cls, originalSelector, originalImp, typeDescription);
         }
     }
-//    v向class添加名为_JP ＋ selector，对应js重写的函数实现
+    
     NSString *JPSelectorName = [NSString stringWithFormat:@"_JP%@", selectorName];
-    SEL JPSelector = NSSelectorFromString(JPSelectorName);
-//    我们存储了一份全局的字典对象，字典的key是classname，
+    
     _initJPOverideMethods(cls);
-
     _JSOverideMethods[cls][JPSelectorName] = function;
     
-    class_addMethod(cls, JPSelector, msgForwardIMP, typeDescription);
+    // Replace the original selector at last, preventing threading issus when
+    // the selector get called during the execution of `overrideMethod`
+    class_replaceMethod(cls, selector, msgForwardIMP, typeDescription);
 }
 
 #pragma mark -
-
-// 具体方法实现
 static id callSelector(NSString *className, NSString *selectorName, JSValue *arguments, JSValue *instance, BOOL isSuper)
 {
     NSString *realClsName = [[instance valueForProperty:@"__realClsName"] toString];
    
     if (instance) {
         instance = formatJSToOC(instance);
-        if (!instance || instance == _nilObj || [instance isKindOfClass:[JPBoxing class]]) return @{@"__isNil": @(YES)};
+        if (class_isMetaClass(object_getClass(instance))) {
+            className = NSStringFromClass((Class)instance);
+            instance = nil;
+        } else if (!instance || instance == _nilObj || [instance isKindOfClass:[JPBoxing class]]) {
+            return @{@"__isNil": @(YES)};
+        }
     }
-//    把js对象和js参数转换为OC对象；
     id argumentsObj = formatJSToOC(arguments);
     
     if (instance && [selectorName isEqualToString:@"toJS"]) {
@@ -978,7 +1035,7 @@ static id callSelector(NSString *className, NSString *selectorName, JSValue *arg
 
     Class cls = instance ? [instance class] : NSClassFromString(className);
     SEL selector = NSSelectorFromString(selectorName);
-//    判断是否调用的是父类的方法，如果是，就走父类的方法实现；
+    
     NSString *superClassName = nil;
     if (isSuper) {
         NSString *superSelectorName = [NSString stringWithFormat:@"SUPER_%@", selectorName];
@@ -996,7 +1053,7 @@ static id callSelector(NSString *className, NSString *selectorName, JSValue *arg
         IMP superIMP = method_getImplementation(superMethod);
         
         class_addMethod(cls, superSelector, superIMP, method_getTypeEncoding(superMethod));
-        //方法重新写
+        
         NSString *JPSelectorName = [NSString stringWithFormat:@"_JP%@", selectorName];
         JSValue *overideFunction = _JSOverideMethods[superCls][JPSelectorName];
         if (overideFunction) {
@@ -1009,7 +1066,7 @@ static id callSelector(NSString *className, NSString *selectorName, JSValue *arg
     
     
     NSMutableArray *_markArray;
-//    把参数等信息封装成NSInvocation对象，并执行，然后返回结果；
+    
     NSInvocation *invocation;
     NSMethodSignature *methodSignature;
     if (!_JSMethodSignatureCache) {
@@ -1023,19 +1080,21 @@ static id callSelector(NSString *className, NSString *selectorName, JSValue *arg
         methodSignature = _JSMethodSignatureCache[cls][selectorName];
         if (!methodSignature) {
             methodSignature = [cls instanceMethodSignatureForSelector:selector];
+            methodSignature = fixSignature(methodSignature);
             _JSMethodSignatureCache[cls][selectorName] = methodSignature;
         }
         [_JSMethodSignatureLock unlock];
         if (!methodSignature) {
-            NSCAssert(methodSignature, @"unrecognized selector %@ for instance %@", selectorName, instance);
+            _exceptionBlock([NSString stringWithFormat:@"unrecognized selector %@ for instance %@", selectorName, instance]);
             return nil;
         }
         invocation = [NSInvocation invocationWithMethodSignature:methodSignature];
         [invocation setTarget:instance];
     } else {
         methodSignature = [cls methodSignatureForSelector:selector];
+        methodSignature = fixSignature(methodSignature);
         if (!methodSignature) {
-            NSCAssert(methodSignature, @"unrecognized selector %@ for class %@", selectorName, className);
+            _exceptionBlock([NSString stringWithFormat:@"unrecognized selector %@ for class %@", selectorName, className]);
             return nil;
         }
         invocation= [NSInvocation invocationWithMethodSignature:methodSignature];
@@ -1153,8 +1212,16 @@ static id callSelector(NSString *className, NSString *selectorName, JSValue *arg
                     break;
                 }
                 if ([(JSValue *)arguments[i-2] hasProperty:@"__isBlock"]) {
-                    __autoreleasing id cb = genCallbackBlock(arguments[i-2]);
-                    [invocation setArgument:&cb atIndex:i];
+                    JSValue *blkJSVal = arguments[i-2];
+                    Class JPBlockClass = NSClassFromString(@"JPBlock");
+                    if (JPBlockClass && ![blkJSVal[@"blockObj"] isUndefined]) {
+                        __autoreleasing id cb = [JPBlockClass performSelector:@selector(blockWithBlockObj:) withObject:[blkJSVal[@"blockObj"] toObject]];
+                        [invocation setArgument:&cb atIndex:i];
+                        Block_release((__bridge void *)cb);
+                    } else {
+                        __autoreleasing id cb = genCallbackBlock(arguments[i-2]);
+                        [invocation setArgument:&cb atIndex:i];
+                    }
                 } else {
                     [invocation setArgument:&valObj atIndex:i];
                 }
@@ -1162,9 +1229,9 @@ static id callSelector(NSString *className, NSString *selectorName, JSValue *arg
         }
     }
     
-    if (superClassName) _currInvokeSuperClsName = superClassName;
+    if (superClassName) _currInvokeSuperClsName[selectorName] = superClassName;
     [invocation invoke];
-    if (superClassName) _currInvokeSuperClsName = nil;
+    if (superClassName) [_currInvokeSuperClsName removeObjectForKey:selectorName];
     if ([_markArray count] > 0) {
         for (JPBoxing *box in _markArray) {
             void *pointer = [box unboxPointer];
@@ -1176,13 +1243,24 @@ static id callSelector(NSString *className, NSString *selectorName, JSValue *arg
             }
         }
     }
-    const char *returnType = [methodSignature methodReturnType];
+    
+    char returnType[255];
+    strcpy(returnType, [methodSignature methodReturnType]);
+    
+    // Restore the return type
+    if (strcmp(returnType, @encode(JPDouble)) == 0) {
+        strcpy(returnType, @encode(double));
+    }
+    if (strcmp(returnType, @encode(JPFloat)) == 0) {
+        strcpy(returnType, @encode(float));
+    }
+
     id returnValue;
     if (strncmp(returnType, "v", 1) != 0) {
         if (strncmp(returnType, "@", 1) == 0) {
             void *result;
             [invocation getReturnValue:&result];
-//            常用在CF对象转化成OC对象时，将CF对象的所有权交给OC对象，此时ARC就能自动管理该内存,作用同CFBridgingRelease()
+            
             //For performance, ignore the other methods prefix with alloc/new/copy/mutableCopy
             if ([selectorName isEqualToString:@"alloc"] || [selectorName isEqualToString:@"new"] ||
                 [selectorName isEqualToString:@"copy"] || [selectorName isEqualToString:@"mutableCopy"]) {
@@ -1269,16 +1347,16 @@ static id callSelector(NSString *className, NSString *selectorName, JSValue *arg
     return nil;
 }
 
-id (*new_msgSend1)(id, SEL, id,...) = (id (*)(id, SEL, id,...)) objc_msgSend;
-id (*new_msgSend2)(id, SEL, id, id,...) = (id (*)(id, SEL, id, id,...)) objc_msgSend;
-id (*new_msgSend3)(id, SEL, id, id, id,...) = (id (*)(id, SEL, id, id, id,...)) objc_msgSend;
-id (*new_msgSend4)(id, SEL, id, id, id, id,...) = (id (*)(id, SEL, id, id, id, id,...)) objc_msgSend;
-id (*new_msgSend5)(id, SEL, id, id, id, id, id,...) = (id (*)(id, SEL, id, id, id, id, id,...)) objc_msgSend;
-id (*new_msgSend6)(id, SEL, id, id, id, id, id, id,...) = (id (*)(id, SEL, id, id, id, id, id, id,...)) objc_msgSend;
-id (*new_msgSend7)(id, SEL, id, id, id, id, id, id, id,...) = (id (*)(id, SEL, id, id, id, id, id, id,id,...)) objc_msgSend;
-id (*new_msgSend8)(id, SEL, id, id, id, id, id, id, id, id,...) = (id (*)(id, SEL, id, id, id, id, id, id, id, id,...)) objc_msgSend;
-id (*new_msgSend9)(id, SEL, id, id, id, id, id, id, id, id, id,...) = (id (*)(id, SEL, id, id, id, id, id, id, id, id, id, ...)) objc_msgSend;
-id (*new_msgSend10)(id, SEL, id, id, id, id, id, id, id, id, id, id,...) = (id (*)(id, SEL, id, id, id, id, id, id, id, id, id, id,...)) objc_msgSend;
+static id (*new_msgSend1)(id, SEL, id,...) = (id (*)(id, SEL, id,...)) objc_msgSend;
+static id (*new_msgSend2)(id, SEL, id, id,...) = (id (*)(id, SEL, id, id,...)) objc_msgSend;
+static id (*new_msgSend3)(id, SEL, id, id, id,...) = (id (*)(id, SEL, id, id, id,...)) objc_msgSend;
+static id (*new_msgSend4)(id, SEL, id, id, id, id,...) = (id (*)(id, SEL, id, id, id, id,...)) objc_msgSend;
+static id (*new_msgSend5)(id, SEL, id, id, id, id, id,...) = (id (*)(id, SEL, id, id, id, id, id,...)) objc_msgSend;
+static id (*new_msgSend6)(id, SEL, id, id, id, id, id, id,...) = (id (*)(id, SEL, id, id, id, id, id, id,...)) objc_msgSend;
+static id (*new_msgSend7)(id, SEL, id, id, id, id, id, id, id,...) = (id (*)(id, SEL, id, id, id, id, id, id,id,...)) objc_msgSend;
+static id (*new_msgSend8)(id, SEL, id, id, id, id, id, id, id, id,...) = (id (*)(id, SEL, id, id, id, id, id, id, id, id,...)) objc_msgSend;
+static id (*new_msgSend9)(id, SEL, id, id, id, id, id, id, id, id, id,...) = (id (*)(id, SEL, id, id, id, id, id, id, id, id, id, ...)) objc_msgSend;
+static id (*new_msgSend10)(id, SEL, id, id, id, id, id, id, id, id, id, id,...) = (id (*)(id, SEL, id, id, id, id, id, id, id, id, id, id,...)) objc_msgSend;
 
 static id invokeVariableParameterMethod(NSMutableArray *origArgumentsList, NSMethodSignature *methodSignature, id sender, SEL selector) {
     
@@ -1351,7 +1429,10 @@ static id genCallbackBlock(JSValue *jsVal)
 {
     #define BLK_TRAITS_ARG(_idx, _paramName) \
     if (_idx < argTypes.count) { \
-        if (blockTypeIsObject(trim(argTypes[_idx]))) {  \
+        NSString *argType = trim(argTypes[_idx]); \
+        if (blockTypeIsScalarPointer(argType)) { \
+            [list addObject:formatOCToJS([JPBoxing boxPointer:_paramName])]; \
+        } else if (blockTypeIsObject(trim(argTypes[_idx]))) {  \
             [list addObject:formatOCToJS((__bridge id)_paramName)]; \
         } else {  \
             [list addObject:formatOCToJS([NSNumber numberWithLongLong:(long long)_paramName])]; \
@@ -1359,6 +1440,9 @@ static id genCallbackBlock(JSValue *jsVal)
     }
 
     NSArray *argTypes = [[jsVal[@"args"] toString] componentsSeparatedByString:@","];
+    if (argTypes.count > [jsVal[@"argCount"] toInt32]) {
+        argTypes = [argTypes subarrayWithRange:NSMakeRange(1, argTypes.count - 1)];
+    }
     id cb = ^id(void *p0, void *p1, void *p2, void *p3, void *p4, void *p5) {
         NSMutableArray *list = [[NSMutableArray alloc] init];
         BLK_TRAITS_ARG(0, p0)
@@ -1406,6 +1490,19 @@ static int sizeOfStructTypes(NSString *structTypes)
             JP_STRUCT_SIZE_CASE('B', BOOL)
             JP_STRUCT_SIZE_CASE('*', void *)
             JP_STRUCT_SIZE_CASE('^', void *)
+                
+            case '{': {
+                NSString *structTypeStr = [structTypes substringFromIndex:index];
+                NSUInteger end = [structTypeStr rangeOfString:@"}"].location;
+                if (end != NSNotFound) {
+                    NSString *subStructName = [structTypeStr substringWithRange:NSMakeRange(1, end - 1)];
+                    NSDictionary *subStructDefine = [JPExtension registeredStruct][subStructName];
+                    NSString *subStructTypes = subStructDefine[@"types"];
+                    size += sizeOfStructTypes(subStructTypes);
+                    index += (int)end;
+                    break;
+                }
+            }
             
             default:
                 break;
@@ -1420,12 +1517,12 @@ static void getStructDataWithDict(void *structData, NSDictionary *dict, NSDictio
     NSArray *itemKeys = structDefine[@"keys"];
     const char *structTypes = [structDefine[@"types"] cStringUsingEncoding:NSUTF8StringEncoding];
     int position = 0;
-    for (int i = 0; i < itemKeys.count; i ++) {
-        switch(structTypes[i]) {
+    for (NSString *itemKey in itemKeys) {
+        switch(*structTypes) {
             #define JP_STRUCT_DATA_CASE(_typeStr, _type, _transMethod) \
             case _typeStr: { \
                 int size = sizeof(_type);    \
-                _type val = [dict[itemKeys[i]] _transMethod];   \
+                _type val = [dict[itemKey] _transMethod];   \
                 memcpy(structData + position, &val, size);  \
                 position += size;    \
                 break;  \
@@ -1442,33 +1539,38 @@ static void getStructDataWithDict(void *structData, NSDictionary *dict, NSDictio
             JP_STRUCT_DATA_CASE('q', long long, longLongValue)
             JP_STRUCT_DATA_CASE('Q', unsigned long long, unsignedLongLongValue)
             JP_STRUCT_DATA_CASE('f', float, floatValue)
+            JP_STRUCT_DATA_CASE('F', CGFloat, CGFloatValue)
             JP_STRUCT_DATA_CASE('d', double, doubleValue)
             JP_STRUCT_DATA_CASE('B', BOOL, boolValue)
             JP_STRUCT_DATA_CASE('N', NSInteger, integerValue)
             JP_STRUCT_DATA_CASE('U', NSUInteger, unsignedIntegerValue)
             
-            case 'F': {
-                int size = sizeof(CGFloat);
-                CGFloat val;
-                #if CGFLOAT_IS_DOUBLE
-                val = [dict[itemKeys[i]] doubleValue];
-                #else
-                val = [dict[itemKeys[i]] floatValue];
-                #endif
-                memcpy(structData + position, &val, size);
-                position += size;
-                break;
-            }
-            
             case '*':
             case '^': {
                 int size = sizeof(void *);
-                void *val = [(JPBoxing *)dict[itemKeys[i]] unboxPointer];
+                void *val = [(JPBoxing *)dict[itemKey] unboxPointer];
                 memcpy(structData + position, &val, size);
                 break;
             }
+            case '{': {
+                NSString *subStructName = [NSString stringWithCString:structTypes encoding:NSASCIIStringEncoding];
+                NSUInteger end = [subStructName rangeOfString:@"}"].location;
+                if (end != NSNotFound) {
+                    subStructName = [subStructName substringWithRange:NSMakeRange(1, end - 1)];
+                    NSDictionary *subStructDefine = [JPExtension registeredStruct][subStructName];
+                    NSDictionary *subDict = dict[itemKey];
+                    int size = sizeOfStructTypes(subStructDefine[@"types"]);
+                    getStructDataWithDict(structData + position, subDict, subStructDefine);
+                    position += size;
+                    structTypes += end;
+                    break;
+                }
+            }
+            default:
+                break;
             
         }
+        structTypes ++;
     }
 }
 
@@ -1479,14 +1581,14 @@ static NSDictionary *getDictOfStruct(void *structData, NSDictionary *structDefin
     const char *structTypes = [structDefine[@"types"] cStringUsingEncoding:NSUTF8StringEncoding];
     int position = 0;
     
-    for (int i = 0; i < itemKeys.count; i ++) {
-        switch(structTypes[i]) {
+    for (NSString *itemKey in itemKeys) {
+        switch(*structTypes) {
             #define JP_STRUCT_DICT_CASE(_typeName, _type)   \
             case _typeName: { \
                 size_t size = sizeof(_type); \
                 _type *val = malloc(size);   \
                 memcpy(val, structData + position, size);   \
-                [dict setObject:@(*val) forKey:itemKeys[i]];    \
+                [dict setObject:@(*val) forKey:itemKey];    \
                 free(val);  \
                 position += size;   \
                 break;  \
@@ -1513,12 +1615,26 @@ static NSDictionary *getDictOfStruct(void *structData, NSDictionary *structDefin
                 size_t size = sizeof(void *);
                 void *val = malloc(size);
                 memcpy(val, structData + position, size);
-                [dict setObject:[JPBoxing boxPointer:val] forKey:itemKeys[i]];
+                [dict setObject:[JPBoxing boxPointer:val] forKey:itemKey];
                 position += size;
                 break;
             }
-            
+            case '{': {
+                NSString *subStructName = [NSString stringWithCString:structTypes encoding:NSASCIIStringEncoding];
+                NSUInteger end = [subStructName rangeOfString:@"}"].location;
+                if (end != NSNotFound) {
+                    subStructName = [subStructName substringWithRange:NSMakeRange(1, end - 1)];
+                    NSDictionary *subStructDefine = [JPExtension registeredStruct][subStructName];
+                    int size = sizeOfStructTypes(subStructDefine[@"types"]);
+                    NSDictionary *subDict = getDictOfStruct(structData + position, subStructDefine);
+                    [dict setObject:subDict forKey:itemKey];
+                    position += size;
+                    structTypes += end;
+                    break;
+                }
+            }
         }
+        structTypes ++;
     }
     return dict;
 }
@@ -1551,6 +1667,15 @@ static BOOL blockTypeIsObject(NSString *typeString)
     return [typeString rangeOfString:@"*"].location != NSNotFound || [typeString isEqualToString:@"id"];
 }
 
+static BOOL blockTypeIsScalarPointer(NSString *typeString)
+{
+    NSUInteger location = [typeString rangeOfString:@"*"].location;
+    NSString *typeWithoutAsterisk = trim([typeString stringByReplacingOccurrencesOfString:@"*" withString:@""]);
+    
+    return (location == typeString.length-1 &&
+            !NSClassFromString(typeWithoutAsterisk));
+}
+
 static NSString *convertJPSelectorString(NSString *selectorString)
 {
     NSString *tmpJSMethodName = [selectorString stringByReplacingOccurrencesOfString:@"__" withString:@"-"];
@@ -1558,15 +1683,8 @@ static NSString *convertJPSelectorString(NSString *selectorString)
     return [selectorName stringByReplacingOccurrencesOfString:@"-" withString:@"_"];
 }
 
-static void garbageCollect(JSContext __weak *context) {
-    [_garbageCollectOperationQueue cancelAllOperations];
-    [_garbageCollectOperationQueue addOperationWithBlock:^{
-        JSSynchronousGarbageCollectForDebugging(context.JSGlobalContextRef);
-    }];
-}
-
 #pragma mark - Object format
-//组装成js 传递
+
 static id formatOCToJS(id obj)
 {
     if ([obj isKindOfClass:[NSString class]] || [obj isKindOfClass:[NSDictionary class]] || [obj isKindOfClass:[NSArray class]] || [obj isKindOfClass:[NSDate class]]) {
@@ -1599,9 +1717,16 @@ static id formatJSToOC(JSValue *jsval)
             id ocObj = [obj objectForKey:@"__obj"];
             if ([ocObj isKindOfClass:[JPBoxing class]]) return [ocObj unbox];
             return ocObj;
+        } else if (obj[@"__clsName"]) {
+            return NSClassFromString(obj[@"__clsName"]);
         }
         if (obj[@"__isBlock"]) {
-            return genCallbackBlock(jsval);
+            Class JPBlockClass = NSClassFromString(@"JPBlock");
+            if (JPBlockClass && ![jsval[@"blockObj"] isUndefined]) {
+                return [JPBlockClass performSelector:@selector(blockWithBlockObj:) withObject:[jsval[@"blockObj"] toObject]];
+            } else {
+                return genCallbackBlock(jsval);
+            }
         }
         NSMutableDictionary *newDict = [[NSMutableDictionary alloc] init];
         for (NSString *key in [obj allKeys]) {
@@ -1650,6 +1775,7 @@ static id _unboxOCObjectToJS(id obj)
     }
     return _wrapObj(obj);
 }
+#pragma clang diagnostic pop
 @end
 
 
@@ -1693,7 +1819,8 @@ static id _unboxOCObjectToJS(id obj)
 
 + (id)formatOCToJS:(id)obj
 {
-    return [[JSContext currentContext][@"_formatOCToJS"] callWithArguments:@[formatOCToJS(obj)]];
+    JSContext *context = [JSContext currentContext] ? [JSContext currentContext]: _context;
+    return [context[@"_formatOCToJS"] callWithArguments:@[formatOCToJS(obj)]];
 }
 
 + (int)sizeOfStructTypes:(NSString *)structTypes
@@ -1719,6 +1846,11 @@ static id _unboxOCObjectToJS(id obj)
 + (NSDictionary *)overideMethods
 {
     return _JSOverideMethods;
+}
+
++ (NSMutableSet *)includedScriptPaths
+{
+    return _runnedScript;
 }
 
 @end

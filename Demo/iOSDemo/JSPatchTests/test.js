@@ -90,6 +90,9 @@ require('JPEngine').defineStruct({
     funcToSwizzleTestPointer: function(pointer) {
       return pointer
     },
+    funcToSwizzleReturnClass:function(){
+      return require('JPTestObject').class()
+    }
   },
   {
     classFuncToSwizzle_int: function(o, num) {
@@ -101,7 +104,14 @@ require('JPEngine').defineStruct({
     },
     classFuncToSwizzleReturnInt: function(i) {
       return i
+    },
+    ///////Test for function which return double/float, cause there's a fatal bug in NSInvocation on iOS7.0
+    classFuncToSwizzleReturnDouble: function(d) {
+      return d
     }
+  })
+  defineClass("JPTestSwizzledForwardInvocationSubObject",{
+    stubMethod: function() {}
   })
 
   var JPTestObject = require("JPTestObject") 
@@ -122,6 +132,28 @@ require('JPEngine').defineStruct({
   obj.funcReturnVoid();
   var testReturnString = obj.funcReturnString().toJS();
   obj.setFuncReturnStringPassed(testReturnString == "stringFromOC")
+
+  ////////Test Class function call
+  testReturnString = obj.funcReturnClass().classFunCallReturnString().toJS();
+  testReturnString2 = obj.funcToSwizzleReturnClass().classFunCallReturnString().toJS();
+  obj.setFuncReturnClassPassed(testReturnString == "classFunCallReturnString" && testReturnString2 == "classFunCallReturnString")
+ 
+  ////////Test Parameter Class return String
+  var instanceString = obj.funcWithClassAndReturnString(JPTestObject.class()).toJS()
+  var instanceString2 = obj.funcWithClassAndReturnString(obj.funcToSwizzleReturnClass()).toJS()
+  var instanceString3 = obj.funcWithClassAndReturnString(obj.funcReturnClass()).toJS()
+  var instanceString4 = obj.funcWithClassAndReturnString(require('JPTestObject')).toJS()
+  obj.setFuncWithClassAndReturnStringPassed(
+      instanceString == "JPTestObject" &&
+      instanceString2 == "JPTestObject" &&
+      instanceString3 == "JPTestObject" &&
+      instanceString4 == "JPTestObject"
+  )
+
+  ///////Test for functions which return double/float, cause there's a fatal bug in NSInvocation on iOS7.0
+  var testReturnDouble = obj.funcReturnDouble()
+  console.log(testReturnDouble == 100)
+  obj.setFuncReturnDoublePassed(testReturnDouble == 100)
 
   obj.funcWithInt(42);
   obj.funcWithDict_andDouble({test: "test"}, 4.2)
@@ -218,6 +250,7 @@ require('JPEngine').defineStruct({
   obj.setPropertySetViewPassed(obj.testView.frame().x == 10)
 
   /////Block
+  require('JPEngine').addExtensions(['JPBlock']);
   var blk = obj.funcReturnBlock();
   blk("stringFromJS", 42);
 
@@ -234,22 +267,40 @@ require('JPEngine').defineStruct({
   }, view)
   obj.setFuncReturnObjectBlockReturnValuePassed(blkRet.toJS() == "succ")
 
-  obj.callBlockWithStringAndInt(block("NSString *, int", function(str, num) {
+  var jsBlkRet = obj.funcReturnJSBlock(block("id, NSString *, int", function(str, num) {
+    obj.setFuncReturnJSBlockPassed(str.toJS() == 'stringFromJS' && num == 42)
+  }))
+  jsBlkRet('stringFromJS', 42);
+    
+  obj.callBlockWithStringAndInt(block("id, NSString *, int", function(str, num) {
     obj.setCallBlockWithStringAndIntPassed(str.toJS() == "stringFromOC" && num == 42)
     return "succ"
   }))
+ 
+  obj.callBlockDelay(block("id, NSString *, int", function(str, num) {
+    obj.setCallBlockWithStringAndIntPassed(str.toJS() == "stringFromOC" && num == 42)
+    return "succ"
+  }))
+ 
+ // request big memory to trigger JSContext gc
+ // make sure the above argument function(str, num) not freed before calling.
+  require('JPEngine').addExtensions(['JPCFunction'])
+  for (var i = 0; i < 100000; i ++) {
+      defineCFunction("malloc", "void *, size_t")
+      var p = malloc(10)
+  }
 
-  obj.callBlockWithArrayAndView(block("NSArray *, UIView *", function(arr, view) {
+  obj.callBlockWithArrayAndView(block("id, NSArray *, UIView *", function(arr, view) {
     var viewFrame = view.frame()
     arr = arr.toJS()
     obj.setCallBlockWithArrayAndViewPassed(arr[0] == "stringFromOC" && arr[1] && viewFrame.width == 100)
   }))
 
-  obj.callBlockWithBoolAndBlock(block("BOOL, NSBlock *", function(b, blk) {
+  obj.callBlockWithBoolAndBlock(block("id, BOOL, NSBlock *", function(b, blk) {
     blk("stringFromJS", b ? 42 : 0);
   }))
 
-  obj.callBlockWithObjectAndBlock(block("UIView *, NSBlock *", function(view, blk) {
+  obj.callBlockWithObjectAndBlock(block("id, UIView *, NSBlock *", function(view, blk) {
     var viewFrame = view.frame()
     var ret = blk((viewFrame.width == 100 ? {
       "str": "stringFromJS",
@@ -257,6 +308,10 @@ require('JPEngine').defineStruct({
     }: {}), view)
     obj.setCallBlockWithObjectAndBlockReturnValuePassed(ret.toJS() == "succ")
   }))
+    
+  obj.callBlockWithDouble(block("double, double", function(num) {
+    return num + 4.2;
+  }));
     
   //////super
   var subObj = require("JPTestSubObject").alloc().init() 

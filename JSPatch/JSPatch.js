@@ -4,7 +4,7 @@ var global = this
 
   var _ocCls = {};
   var _jsCls = {};
-  //转换城js对象
+
   var _formatOCToJS = function(obj) {
     if (obj === undefined || obj === null) return false
     if (typeof obj == "object") {
@@ -18,7 +18,6 @@ var global = this
       })
       return ret
     }
-  //不懂
     if (obj instanceof Function) {
         return function() {
             var args = Array.prototype.slice.call(arguments)
@@ -43,7 +42,6 @@ var global = this
     return obj
   }
   
-  //方法调用
   var _methodFunc = function(instance, clsName, methodName, args, isSuper, isPerformSelector) {
     var selectorName = methodName
     if (!isPerformSelector) {
@@ -85,28 +83,6 @@ var global = this
         if (_ocCls[clsName][methodType][methodName]) {
           slf.__isSuper = 0;
           return _ocCls[clsName][methodType][methodName].bind(slf)
-        }
-
-        if (slf.__obj && _ocCls[clsName]['props'][methodName]) {
-          if (!slf.__ocProps) {
-            var props = _OC_getCustomProps(slf.__obj)
-            if (!props) {
-              props = {}
-              _OC_setCustomProps(slf.__obj, props)
-            }
-            slf.__ocProps = props;
-          }
-          var c = methodName.charCodeAt(3);
-          if (methodName.length > 3 && methodName.substr(0,3) == 'set' && c >= 65 && c <= 90) {
-            return function(val) {
-              var propName = methodName[3].toLowerCase() + methodName.substr(4)
-              slf.__ocProps[propName] = val
-            }
-          } else {
-            return function(){ 
-              return slf.__ocProps[methodName]
-            }
-          }
         }
       }
 
@@ -152,16 +128,16 @@ var global = this
     return global[clsName]
   }
 
-  global.require = function(clsNames) {
+  global.require = function() {
     var lastRequire
-    clsNames.split(',').forEach(function(clsName) {
-      lastRequire = _require(clsName.trim())
-    })
+    for (var i = 0; i < arguments.length; i ++) {
+      arguments[i].split(',').forEach(function(clsName) {
+        lastRequire = _require(clsName.trim())
+      })
+    }
     return lastRequire
   }
-  
-  //新的方法列表,修改为新的
-//  传递参数个数的目的是，runtime在修复类的时候，无法直接解析原始的js实现函数，那么就不知道参数的个数，特别是在创建新的方法的时候，需要根据参数个数生成方法签名，所以只能在js端拿到js函数的参数个数，传递到OC端。
+
   var _formatDefineMethods = function(methods, newMethods, realClsName) {
     for (var methodName in methods) {
       if (!(methods[methodName] instanceof Function)) return;
@@ -170,17 +146,14 @@ var global = this
         newMethods[methodName] = [originMethod.length, function() {
           try {
             var args = _formatOCToJS(Array.prototype.slice.call(arguments))
-        //self的处理，在js修复代码中我们可以像在OC中一样使用self；
             var lastSelf = global.self
             global.self = args[0]
             if (global.self) global.self.__realClsName = realClsName
-        //  args.splice(0,1)删除前两个参数：
             args.splice(0,1)
             var ret = originMethod.apply(originMethod, args)
             global.self = lastSelf
             return ret
           } catch(e) {
-                                  
             _OC_catch(e.message, e.stack)
           }
         }]
@@ -207,22 +180,61 @@ var global = this
     }
   }
 
-  //类名字  instMethods 方法
+  var _propertiesGetFun = function(name){
+    return function(){
+      var slf = this;
+      if (!slf.__ocProps) {
+        var props = _OC_getCustomProps(slf.__obj)
+        if (!props) {
+          props = {}
+          _OC_setCustomProps(slf.__obj, props)
+        }
+        slf.__ocProps = props;
+      }
+      return slf.__ocProps[name];
+    };
+  }
+
+  var _propertiesSetFun = function(name){
+    return function(jval){
+      var slf = this;
+      if (!slf.__ocProps) {
+        var props = _OC_getCustomProps(slf.__obj)
+        if (!props) {
+          props = {}
+          _OC_setCustomProps(slf.__obj, props)
+        }
+        slf.__ocProps = props;
+      }
+      slf.__ocProps[name] = jval;
+    };
+  }
+
   global.defineClass = function(declaration, properties, instMethods, clsMethods) {
-  //缺省
     var newInstMethods = {}, newClsMethods = {}
     if (!(properties instanceof Array)) {
       clsMethods = instMethods
       instMethods = properties
       properties = null
     }
-// 类名字
+
+    if (properties) {
+      properties.forEach(function(name){
+        if (!instMethods[name]) {
+          instMethods[name] = _propertiesGetFun(name);
+        }
+        var nameOfSet = "set"+ name.substr(0,1).toUpperCase() + name.substr(1);
+        if (!instMethods[nameOfSet]) {
+          instMethods[nameOfSet] = _propertiesSetFun(name);
+        }
+      });
+    }
+
     var realClsName = declaration.split(':')[0].trim()
 
     _formatDefineMethods(instMethods, newInstMethods, realClsName)
     _formatDefineMethods(clsMethods, newClsMethods, realClsName)
-  
-  //在oc创建类和方法
+
     var ret = _OC_defineClass(declaration, newInstMethods, newClsMethods)
     var className = ret['cls']
     var superCls = ret['superCls']
@@ -230,7 +242,6 @@ var global = this
     _ocCls[className] = {
       instMethods: {},
       clsMethods: {},
-      props: {}
     }
 
     if (superCls.length && _ocCls[superCls]) {
@@ -240,20 +251,11 @@ var global = this
       for (var funcName in _ocCls[superCls]['clsMethods']) {
         _ocCls[className]['clsMethods'][funcName] = _ocCls[superCls]['clsMethods'][funcName]
       }
-      if (_ocCls[superCls]['props']) {
-        _ocCls[className]['props'] = JSON.parse(JSON.stringify(_ocCls[superCls]['props']));
-      }
     }
 
     _setupJSMethod(className, instMethods, 1, realClsName)
     _setupJSMethod(className, clsMethods, 0, realClsName)
 
-    if (properties) {
-      properties.forEach(function(o){
-        _ocCls[className]['props'][o] = 1
-        _ocCls[className]['props']['set' + o.substr(0,1).toUpperCase() + o.substr(1)] = 1
-      })
-    }
     return require(className)
   }
 
@@ -263,16 +265,22 @@ var global = this
   }
 
   global.block = function(args, cb) {
-    var slf = this
+    var that = this
+    var slf = global.self
     if (args instanceof Function) {
       cb = args
       args = ''
     }
     var callback = function() {
       var args = Array.prototype.slice.call(arguments)
-      return cb.apply(slf, _formatOCToJS(args))
+      global.self = slf
+      return cb.apply(that, _formatOCToJS(args))
     }
-    return {args: args, cb: callback, __isBlock: 1}
+    var ret = {args: args, cb: callback, argCount: cb.length, __isBlock: 1}
+    if (global.__genBlock) {
+      ret['blockObj'] = global.__genBlock(args, cb)
+    }
+    return ret
   }
   
   if (global.console) {
